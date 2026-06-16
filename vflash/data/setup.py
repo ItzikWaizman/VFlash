@@ -85,10 +85,20 @@ def index_videos(video_dir):
     return idx
 
 
+def _ann_priority(path):
+    """captions (long, caption-benchmark style) first, then open-ended QA, MC last."""
+    n = os.path.basename(path).lower()
+    if "cap" in n:
+        return 0
+    if "oe" in n:
+        return 1
+    return 2
+
+
 def build_manifest(json_paths, video_dir, out_path, num_samples, exclude_ids):
     idx = index_videos(video_dir)
     records = []
-    for jf in sorted(json_paths):
+    for jf in sorted(json_paths, key=_ann_priority):
         try:
             data = json.load(open(jf))
         except Exception:
