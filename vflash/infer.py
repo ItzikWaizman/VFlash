@@ -101,7 +101,8 @@ def ar_generate(target, input_ids, mm_inputs, max_new_tokens, stop_token_ids, te
         if stop is not None and token.item() in stop_token_ids:
             break
     decode_t = cuda_time() - decode0
-    return SimpleNamespace(num_output_tokens=len(gen),
+    gen_ids = torch.cat(gen, dim=1).cpu()
+    return SimpleNamespace(num_output_tokens=len(gen), output_ids=gen_ids,
                            time_per_output_token=decode_t / max(len(gen), 1))
 
 
