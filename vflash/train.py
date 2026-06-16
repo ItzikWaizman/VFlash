@@ -94,10 +94,25 @@ def build_prompt_inputs(target, sample, device):
                                         {"type": "text", "text": sample["prompt"]}]}
     text = proc.apply_chat_template([user], add_generation_prompt=True, tokenize=False)
     enc = proc(text=text, videos=[sample["frames"]], return_tensors="pt")
-    enc = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in enc.items()}
+    enc = {k: _to_device(v, device, target.dtype) for k, v in enc.items()}
     input_ids = enc.pop("input_ids")
     enc.pop("attention_mask", None)                                # bsz=1, no padding; length-agnostic mm only
     return input_ids, enc
+
+
+def _to_device(v, device, dtype):
+    if not torch.is_tensor(v):
+        return v
+    return v.to(device=device, dtype=dtype) if v.is_floating_point() else v.to(device)
+
+
+def gen_cache_dir(cfg):
+    """Cache the target's generations keyed by (target, frames, max_new_tokens) so all
+    drafter variants on the same data reuse it. Override with cfg['gen_cache_dir']."""
+    tag = (os.path.basename(cfg["target_model"].rstrip("/")) +
+           f"_f{cfg['frames']}_n{cfg['max_new_tokens']}")
+    root = cfg.get("gen_cache_dir") or os.path.join(cfg["data_path"], "gen_cache")
+    return os.path.join(root, tag)
 
 
 class GenCache:
@@ -105,7 +120,7 @@ class GenCache:
     Shared across DDP ranks via atomic rename; hidden states/logits are never stored."""
 
     def __init__(self, root, enabled=True):
-        self.dir = os.path.join(root, "gen_cache")
+        self.dir = root
         self.enabled = enabled
         if enabled:
             os.makedirs(self.dir, exist_ok=True)
@@ -136,15 +151,15 @@ def build_context(target, sample, cfg, device, cache, stop):
     P = input_ids.shape[1]
     if cfg.get("context_source", "target") == "gt":
         resp = target.processor.tokenizer(sample["response"], return_tensors="pt",
-                                          add_special_tokens=False)["input_ids"].to(device)
+                                          add_special_tokens=False)["input_ids"][0].to(device)
     else:
         from .infer import ar_generate
-        resp = cache.get(sample["uid"])
+        resp = cache.get(sample["uid"])                            # cached as 1-D [L]
         if resp is None:
-            resp = ar_generate(target, input_ids, mm, cfg["max_new_tokens"], stop, 0.0).output_ids
-            cache.put(sample["uid"], resp[0])
+            resp = ar_generate(target, input_ids, mm, cfg["max_new_tokens"], stop, 0.0).output_ids[0]
+            cache.put(sample["uid"], resp)
         resp = resp.to(device)
-    full_ids = torch.cat([input_ids, resp], dim=1)                  # [1, P+L]
+    full_ids = torch.cat([input_ids, resp[None]], dim=1)           # [1, P+L]
     loss_mask = torch.zeros(full_ids.shape[1], device=device)
     loss_mask[P:] = 1.0
     if full_ids.shape[1] > cfg["max_length"]:
@@ -228,7 +243,7 @@ def main():
 
     monitor = Monitor(cfg["output_dir"], cfg["block_size"]) if is_main() else None
     os.makedirs(cfg["output_dir"], exist_ok=True)
-    cache = GenCache(cfg["output_dir"], enabled=cfg.get("gen_cache", True))
+    cache = GenCache(gen_cache_dir(cfg), enabled=cfg.get("gen_cache", True))
     stop = [processor.tokenizer.eos_token_id]
     step = 0
     ema_step_t = None

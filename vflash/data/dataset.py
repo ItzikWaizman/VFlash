@@ -35,6 +35,12 @@ def load_video_frames(path, num_frames):
     return out
 
 
+def record_uid(rec):
+    """Stable id from (video, prompt) -> used as the generation-cache key. Computable
+    from the manifest record alone (no video decode), so pregen can skip cached samples."""
+    return hashlib.md5((rec["video"] + "||" + rec["prompt"]).encode()).hexdigest()[:16]
+
+
 class VideoInstructDataset(Dataset):
     """Reads a manifest JSONL of {video, prompt, response}; yields raw samples.
     Tokenization/processor application happens in the train loop (needs the VLM
@@ -49,13 +55,12 @@ class VideoInstructDataset(Dataset):
 
     def __getitem__(self, i):
         r = self.records[i]
-        uid = hashlib.md5((r["video"] + "||" + r["prompt"]).encode()).hexdigest()[:16]
         return {
             "frames": load_video_frames(r["video"], self.num_frames),
             "prompt": r["prompt"],
             "response": r["response"],
             "video": r["video"],
-            "uid": uid,
+            "uid": record_uid(r),
         }
 
 

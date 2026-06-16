@@ -10,6 +10,11 @@ tradeoff for long video context.
 Target/draft: `llava-onevision-qwen2-7b-ov-hf` (frozen) + a 4-layer warm-started
 drafter. Data: `lmms-lab/LLaVA-Video-178K`. Online self-distillation (CE + KL).
 
+Training is **on-policy**: the drafter is distilled over the target's *own* greedy
+generations (matching lossless speculative-decoding eval), not the dataset ground
+truth. Those generations are pre-computed once (see step 1) and cached as token ids;
+hidden states and KL logits are always recomputed online (never stored).
+
 ## Two pluggable features (both behind knobs)
 - `--visual-compress qformer` + `--num-queries N`: learnable queries cross-attend
   over the target's visual hidden states -> N position-less memory tokens that
@@ -33,8 +38,9 @@ vflash/
   tree.py                     DDtree draft-tree decoding
   monitor.py                  metrics.jsonl + live-overwritten plots
   data/setup.py               HF downloads + manifest builder
+  data/pregen.py              batched greedy pre-generation -> gen_cache (SLURM array)
   data/dataset.py             video frames + manifest dataset
-scripts/                      setup.sh, train.sh, infer.sh (one .sh per mission)
+scripts/                      setup.sh, pregen.sh, train.sh, infer.sh, benchmark.sh
 tests/smoke_test.py           CPU smoke test (local only, not tracked in git)
 ```
 
@@ -49,7 +55,16 @@ hyperparameters live in that `.json`. New experiment = new json under `experimen
 bash scripts/setup.sh experiments/baseline.json
 ```
 
-1. Train the drafter (8 GPUs):
+1. Pre-generate the target's greedy responses into `gen_cache` (one GPU per shard;
+   resumable, skips cached). Optional but strongly recommended — it removes the slow
+   autoregressive generation from the training loop. Locally it runs one shard:
+```
+bash scripts/pregen.sh experiments/baseline.json
+```
+On SLURM, fan out as an array (e.g. 8 shards, 1 GPU each): see the SLURM section.
+If skipped, training generates on-policy lazily on the first epoch and caches as it goes.
+
+2. Train the drafter (multi-GPU; reads gen_cache, 100% cache hits after step 1):
 ```
 bash scripts/train.sh experiments/baseline.json     # full visual injection
 bash scripts/train.sh experiments/qformer.json      # Q-Former compression
@@ -59,13 +74,13 @@ live plots under `outputs/<run>/plots/` (per-position accuracy, accepted length,
 step timing, eval speedup). Also logs running average visual / prompt / response
 token counts.
 
-2. Evaluate speedup vs AR (chain or tree):
+3. Evaluate speedup vs AR (chain or tree):
 ```
 bash scripts/infer.sh experiments/baseline.json                       # chain SD
 bash scripts/infer.sh experiments/baseline.json --draft-tree 1 --tree-budget 60   # DDtree
 ```
 
-3. VideoDetailCaption benchmark (paper-comparable: reports M + speedup):
+4. VideoDetailCaption benchmark (paper-comparable: reports M + speedup):
 ```
 bash scripts/benchmark.sh experiments/baseline.json                   # chain
 bash scripts/benchmark.sh experiments/baseline.json --draft-tree 1    # DDtree
@@ -82,6 +97,7 @@ pass `--judge openai` (needs `OPENAI_API_KEY`) for a built-in GPT judge approxim
 `block_size` `num_anchors` `draft_layers` `inject_response_hidden`
 `ce_weight` `kl_weight` `kl_temp` `kl_topk` `loss_decay_gamma`
 `epochs` `lr` `frames` `max_length` `attn_backend {flex,sdpa}`
+`context_source {target,gt}` `gen_cache` `max_new_tokens`
 
 ## SLURM (single-line submit; run from the cloned repo root)
 
@@ -91,6 +107,10 @@ First: `cd /scratch300/itzikwaizman/vflash/VFlash && git pull && mkdir -p output
 Setup (downloads):
 ```
 sbatch -A gpu-tad-wolf_v2 -p gpu-tad-pool --qos=owner --gres=gpu:1 --time=04:00:00 --cpus-per-task=2 --mem=16G -o output_logs/vflash_setup.out --job-name=vflash_setup --chdir /scratch300/itzikwaizman/vflash/VFlash ./scripts/setup.sh experiments/baseline.json
+```
+Pre-generation (array of 8 shards, 1 GPU each; `%a` = task id in the log name):
+```
+sbatch --array=0-7 -A gpu-tad-wolf_v2 -p gpu-tad-pool --qos=owner --gres=gpu:1 --time=12:00:00 --cpus-per-task=4 --mem=32G -o output_logs/vflash_pregen_%a.out --job-name=vflash_pregen --chdir /scratch300/itzikwaizman/vflash/VFlash ./scripts/pregen.sh experiments/baseline.json
 ```
 Training (8xA100):
 ```
@@ -124,6 +144,11 @@ Exercises the full core (training step, chain SD, DDtree SD, Q-Former compressio
 monitor) on a tiny synthetic Qwen2 target.
 
 ## Notes
+- On-policy: the only thing cached on disk is the target's generated token ids
+  (~1KB/sample, under `data/cache/.../gen_cache/<target>_f<frames>_n<max_new>/`). The
+  cache is keyed by target+frames, so baseline and qformer runs share it (pregen once).
+  Set `context_source: "gt"` for dataset answers, or `gen_cache: false` to regenerate
+  every epoch.
 - Online training avoids the multi-GB/sample disk cost of storing 25K-token visual
   hidden states needed for offline KL.
 - `flex` attention is used for the large-context training mask; `sdpa` is the
