@@ -80,7 +80,7 @@ def main():
     cfg["stop_token_ids"] = [target.processor.tokenizer.eos_token_id]
     tok = target.processor.tokenizer
 
-    from .train import build_target_inputs
+    from .train import build_prompt_inputs
     from .data.dataset import VideoInstructDataset
     ds = VideoInstructDataset(manifest, cfg["frames"])
 
@@ -90,11 +90,10 @@ def main():
 
     for i in range(min(args.num_eval, len(ds))):
         sample = ds[i]
-        inputs, _ = build_target_inputs(target, sample, cfg["max_length"], device)
-        input_ids = inputs.pop("input_ids")
+        input_ids, mm = build_prompt_inputs(target, sample, device)
         S = input_ids.shape[1]
-        sd = generate(drafter, target, input_ids, inputs, cfg)
-        ar = ar_generate(target, input_ids, inputs, cfg["max_new_tokens"],
+        sd = generate(drafter, target, input_ids, mm, cfg)
+        ar = ar_generate(target, input_ids, mm, cfg["max_new_tokens"],
                          cfg["stop_token_ids"], 0.0)
 
         sd_resp = sd.output_ids[0, S:]

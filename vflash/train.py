@@ -86,30 +86,71 @@ def compute_block_loss(drafter, draft_module, target, input_ids, target_hidden, 
 # VLM input building (processor-dependent; validated on cluster).
 # --------------------------------------------------------------------------
 
-def build_target_inputs(target, sample, max_length, device):
+def build_prompt_inputs(target, sample, device):
+    """video + prompt only (the inference/eval starting point).
+    Returns (input_ids [1,P], mm_inputs) where mm_inputs holds pixel_values_*."""
     proc = target.processor
     user = {"role": "user", "content": [{"type": "video"},
                                         {"type": "text", "text": sample["prompt"]}]}
-    asst = {"role": "assistant", "content": [{"type": "text", "text": sample["response"]}]}
-    prompt_text = proc.apply_chat_template([user], add_generation_prompt=True, tokenize=False)
-    full_text = proc.apply_chat_template([user, asst], add_generation_prompt=False, tokenize=False)
-    vids = [sample["frames"]]
-    full = proc(text=full_text, videos=vids, return_tensors="pt")
-    prompt = proc(text=prompt_text, videos=vids, return_tensors="pt")
+    text = proc.apply_chat_template([user], add_generation_prompt=True, tokenize=False)
+    enc = proc(text=text, videos=[sample["frames"]], return_tensors="pt")
+    enc = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in enc.items()}
+    input_ids = enc.pop("input_ids")
+    enc.pop("attention_mask", None)                                # bsz=1, no padding; length-agnostic mm only
+    return input_ids, enc
 
-    input_ids = full["input_ids"]
-    P = prompt["input_ids"].shape[1]
-    S = input_ids.shape[1]
-    loss_mask = torch.zeros(S)
+
+class GenCache:
+    """Disk cache of the target's own generated token ids (tiny ints, ~1KB/sample).
+    Shared across DDP ranks via atomic rename; hidden states/logits are never stored."""
+
+    def __init__(self, root, enabled=True):
+        self.dir = os.path.join(root, "gen_cache")
+        self.enabled = enabled
+        if enabled:
+            os.makedirs(self.dir, exist_ok=True)
+
+    def get(self, uid):
+        p = os.path.join(self.dir, uid + ".pt")
+        if self.enabled and os.path.exists(p):
+            try:
+                return torch.load(p)
+            except Exception:
+                return None
+        return None
+
+    def put(self, uid, ids):
+        if not self.enabled:
+            return
+        p = os.path.join(self.dir, uid + ".pt")
+        tmp = f"{p}.tmp.{os.getpid()}"
+        torch.save(ids.cpu(), tmp)
+        os.replace(tmp, p)
+
+
+def build_context(target, sample, cfg, device, cache, stop):
+    """Build the (full_ids, loss_mask, mm_inputs) the drafter trains over.
+    On-policy (default): context = prompt + the target's own greedy generation, so
+    training matches lossless speculative-decoding eval. 'gt' uses the dataset answer."""
+    input_ids, mm = build_prompt_inputs(target, sample, device)
+    P = input_ids.shape[1]
+    if cfg.get("context_source", "target") == "gt":
+        resp = target.processor.tokenizer(sample["response"], return_tensors="pt",
+                                          add_special_tokens=False)["input_ids"].to(device)
+    else:
+        from .infer import ar_generate
+        resp = cache.get(sample["uid"])
+        if resp is None:
+            resp = ar_generate(target, input_ids, mm, cfg["max_new_tokens"], stop, 0.0).output_ids
+            cache.put(sample["uid"], resp[0])
+        resp = resp.to(device)
+    full_ids = torch.cat([input_ids, resp], dim=1)                  # [1, P+L]
+    loss_mask = torch.zeros(full_ids.shape[1], device=device)
     loss_mask[P:] = 1.0
-    if S > max_length:                                              # truncate response tail
-        input_ids = input_ids[:, :max_length]
-        loss_mask = loss_mask[:max_length]
-        full["input_ids"] = input_ids
-        if "attention_mask" in full:
-            full["attention_mask"] = full["attention_mask"][:, :max_length]
-    full = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in full.items()}
-    return full, loss_mask.to(device)
+    if full_ids.shape[1] > cfg["max_length"]:
+        full_ids = full_ids[:, :cfg["max_length"]]
+        loss_mask = loss_mask[:cfg["max_length"]]
+    return full_ids, loss_mask, mm
 
 
 # --------------------------------------------------------------------------
@@ -187,6 +228,8 @@ def main():
 
     monitor = Monitor(cfg["output_dir"], cfg["block_size"]) if is_main() else None
     os.makedirs(cfg["output_dir"], exist_ok=True)
+    cache = GenCache(cfg["output_dir"], enabled=cfg.get("gen_cache", True))
+    stop = [processor.tokenizer.eos_token_id]
     step = 0
     ema_step_t = None
     t_start = time.time()
@@ -198,16 +241,15 @@ def main():
         for sample in loader:
             t0 = cuda_time()
             try:
-                inputs, loss_mask = build_target_inputs(target, sample, cfg["max_length"], device)
+                input_ids, loss_mask, mm = build_context(target, sample, cfg, device, cache, stop)
             except Exception as e:
                 if is_main():
                     print(f"[skip] sample failed: {e}")
                 continue
-            input_ids = inputs["input_ids"]
             anchors, keep = sample_anchors(loss_mask, cfg["block_size"], cfg["num_anchors"], device)
             if anchors is None:
                 continue
-            out = target.forward(want_hidden=True, logits_to_keep=1, **inputs)
+            out = target.forward(want_hidden=True, logits_to_keep=1, input_ids=input_ids, **mm)
             target_hidden = out.target_hidden.clone()
             last_hidden = out.last_hidden.clone()
             visual_mask = target.visual_mask(input_ids)
@@ -262,12 +304,11 @@ def main():
 def _run_eval(draft_module, target, sample, cfg, device, monitor, step):
     from .infer import spec_generate, ar_generate
     try:
-        inputs, _ = build_target_inputs(target, sample, cfg["max_length"], device)
-        input_ids = inputs.pop("input_ids")
+        input_ids, mm = build_prompt_inputs(target, sample, device)
         stop = [target.processor.tokenizer.eos_token_id]
-        sd = spec_generate(draft_module, target, input_ids, inputs, cfg["max_new_tokens"],
+        sd = spec_generate(draft_module, target, input_ids, mm, cfg["max_new_tokens"],
                            cfg["block_size"], cfg["mask_token_id"], stop, cfg["temperature"])
-        ar = ar_generate(target, input_ids, inputs, cfg["max_new_tokens"], stop, cfg["temperature"])
+        ar = ar_generate(target, input_ids, mm, cfg["max_new_tokens"], stop, cfg["temperature"])
         speedup = ar.time_per_output_token / max(sd.time_per_output_token, 1e-9)
         monitor.log_eval(step, dict(speedup=speedup,
                                     sd_tps=1 / sd.time_per_output_token,

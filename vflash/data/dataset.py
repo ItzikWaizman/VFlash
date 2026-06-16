@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import numpy as np
@@ -48,10 +49,13 @@ class VideoInstructDataset(Dataset):
 
     def __getitem__(self, i):
         r = self.records[i]
+        uid = hashlib.md5((r["video"] + "||" + r["prompt"]).encode()).hexdigest()[:16]
         return {
             "frames": load_video_frames(r["video"], self.num_frames),
             "prompt": r["prompt"],
             "response": r["response"],
+            "video": r["video"],
+            "uid": uid,
         }
 
 

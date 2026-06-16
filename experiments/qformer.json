@@ -18,6 +18,8 @@
   "num_samples": 50000,
   "frames": 32,
   "max_length": 8192,
+  "context_source": "target",
+  "gen_cache": true,
 
   "epochs": 4,
   "batch_size": 1,

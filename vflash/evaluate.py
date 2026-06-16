@@ -58,16 +58,15 @@ def main():
     cfg["mask_token_id"] = dcfg["mask_token_id"]
     cfg["stop_token_ids"] = [target.processor.tokenizer.eos_token_id]
 
-    from .train import build_target_inputs
+    from .train import build_prompt_inputs
     from .data.dataset import VideoInstructDataset
     ds = VideoInstructDataset(manifest, cfg["frames"])
 
     speedups, accepts, sd_tps = [], [], []
     for i in range(min(args.num_eval, len(ds))):
-        inputs, _ = build_target_inputs(target, ds[i], cfg["max_length"], device)
-        input_ids = inputs.pop("input_ids")
-        sd = generate(drafter, target, input_ids, inputs, cfg)
-        ar = ar_generate(target, input_ids, inputs, cfg["max_new_tokens"],
+        input_ids, mm = build_prompt_inputs(target, ds[i], device)
+        sd = generate(drafter, target, input_ids, mm, cfg)
+        ar = ar_generate(target, input_ids, mm, cfg["max_new_tokens"],
                          cfg["stop_token_ids"], cfg["temperature"])
         speedups.append(ar.time_per_output_token / max(sd.time_per_output_token, 1e-9))
         accepts.append(sum(sd.acceptance_lengths) / max(len(sd.acceptance_lengths), 1))
