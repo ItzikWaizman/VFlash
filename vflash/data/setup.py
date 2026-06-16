@@ -3,17 +3,21 @@ then write a flat manifest JSONL that dataset.py consumes.
 
 Run order: this is step 0. See README.
 
-The LLaVA-Video-178K repo is sharded by academic source; each subset folder holds
-annotation json(s) plus the referenced videos. We download one subset, parse its
-annotations into {video, prompt, response} records, cap to --num-samples, and keep
-only records whose video file exists locally.
+The LLaVA-Video-178K repo is sharded by source; each subset folder holds annotation
+json(s) plus videos packed as *.tar.gz shards. We download one subset, extract the
+shards into videos/<subset>/ (deleting each tar after extraction to save disk), parse
+the annotations into {video, prompt, response} records, cap to num_samples, and keep
+only records whose video resolves on disk.
 """
 import argparse
-import glob
 import json
 import os
+import tarfile
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, list_repo_files, snapshot_download
+
+DATASET_REPO = "lmms-lab/LLaVA-Video-178K"
+VIDEO_EXTS = (".mp4", ".mkv", ".webm", ".avi", ".mov")
 
 
 def download_models(target, baseline, cache_dir):
@@ -25,13 +29,37 @@ def download_models(target, baseline, cache_dir):
                           allow_patterns=["*.json", "*.safetensors", "*.model", "*.txt", "tokenizer*"])
 
 
-def download_dataset(subset, cache_dir, out_root):
-    print(f"[setup] downloading LLaVA-Video-178K subset '{subset}'")
-    local = snapshot_download(
-        repo_id="lmms-lab/LLaVA-Video-178K", repo_type="dataset",
-        cache_dir=cache_dir, allow_patterns=[f"{subset}/*"],
-    )
-    return os.path.join(local, subset)
+def download_dataset(subset, cache_dir, data_path):
+    """Fetch the subset's annotation json(s) (small) and video shards (*.tar.gz),
+    extracting each shard into videos/<subset>/ then deleting the tar to save disk.
+    Returns (json_paths, video_dir)."""
+    files = [f for f in list_repo_files(DATASET_REPO, repo_type="dataset")
+             if f.startswith(subset + "/")]
+    json_files = [f for f in files if f.endswith(".json")]
+    tar_files = sorted(f for f in files if f.endswith(".tar.gz"))
+
+    json_paths = [hf_hub_download(DATASET_REPO, f, repo_type="dataset", cache_dir=cache_dir)
+                  for f in json_files]
+
+    video_dir = os.path.join(data_path, "videos", subset)
+    os.makedirs(video_dir, exist_ok=True)
+    for i, f in enumerate(tar_files):
+        done = os.path.join(video_dir, "." + os.path.basename(f) + ".done")
+        if os.path.exists(done):
+            continue
+        print(f"[setup] ({i + 1}/{len(tar_files)}) download+extract {os.path.basename(f)}")
+        # Reuse the HF cache so partial downloads resume; delete the blob after
+        # extraction to reclaim disk (peak extra space stays ~1 shard).
+        tar_path = hf_hub_download(DATASET_REPO, f, repo_type="dataset", cache_dir=cache_dir)
+        with tarfile.open(tar_path, "r:gz") as t:
+            t.extractall(video_dir)
+        for p in {tar_path, os.path.realpath(tar_path)}:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        open(done, "w").close()
+    return json_paths, video_dir
 
 
 def parse_conversations(conv):
@@ -47,9 +75,20 @@ def parse_conversations(conv):
     return prompt, response
 
 
-def build_manifest(subset_dir, out_path, num_samples, exclude_ids):
+def index_videos(video_dir):
+    """basename -> absolute path, so manifest resolution is robust to tar layout."""
+    idx = {}
+    for root, _, names in os.walk(video_dir):
+        for n in names:
+            if n.lower().endswith(VIDEO_EXTS):
+                idx.setdefault(n, os.path.join(root, n))
+    return idx
+
+
+def build_manifest(json_paths, video_dir, out_path, num_samples, exclude_ids):
+    idx = index_videos(video_dir)
     records = []
-    for jf in sorted(glob.glob(os.path.join(subset_dir, "**", "*.json"), recursive=True)):
+    for jf in sorted(json_paths):
         try:
             data = json.load(open(jf))
         except Exception:
@@ -61,8 +100,10 @@ def build_manifest(subset_dir, out_path, num_samples, exclude_ids):
             conv = item.get("conversations")
             if not vid or not conv:
                 continue
-            vpath = os.path.join(subset_dir, vid)
+            vpath = os.path.join(video_dir, vid)
             if not os.path.exists(vpath):
+                vpath = idx.get(os.path.basename(vid))
+            if not vpath or not os.path.exists(vpath):
                 continue
             if os.path.splitext(os.path.basename(vid))[0] in exclude_ids:
                 continue
@@ -102,8 +143,8 @@ def main():
     exclude = set()
     if args.exclude_ids_file and os.path.exists(args.exclude_ids_file):
         exclude = {l.strip() for l in open(args.exclude_ids_file) if l.strip()}
-    subset_dir = download_dataset(subset, hf_cache, manifest)
-    build_manifest(subset_dir, manifest, num_samples, exclude)
+    json_paths, video_dir = download_dataset(subset, hf_cache, cfg["data_path"])
+    build_manifest(json_paths, video_dir, manifest, num_samples, exclude)
 
 
 if __name__ == "__main__":
