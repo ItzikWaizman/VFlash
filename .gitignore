@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+*.pt
+*.bin
+*.safetensors
+.venv/
+venv/
+
+# local-only smoke tests (not part of the repo)
+tests/
+
+# data, model weights, run artifacts
+data/cache/
+data/videos/
+data/raw/
+checkpoints/
+outputs/
+runs/
+output_logs/
+wandb/
+
+# HF caches if placed in-repo
+hf_cache/
+*.mp4
+*.avi
+*.mkv
+*.webm
