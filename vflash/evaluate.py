@@ -51,7 +51,8 @@ def main():
         from transformers import AutoModelForImageTextToText as AutoVLM
     except ImportError:
         from transformers import AutoModelForVision2Seq as AutoVLM
-    model = AutoVLM.from_pretrained(cfg["target_model"], torch_dtype=dtype, attn_implementation="sdpa").to(device)
+    model = AutoVLM.from_pretrained(cfg["target_model"], torch_dtype=dtype,
+                                    attn_implementation=cfg.get("attn_impl", "sdpa")).to(device)
     target = HFTarget(model, AutoProcessor.from_pretrained(cfg["target_model"]))
     drafter, dcfg = load_drafter(checkpoint, target, device, dtype)
     cfg["mask_token_id"] = dcfg["mask_token_id"]

@@ -9,11 +9,12 @@
   "mask_token_id": null,
 
   "visual_compress": "qformer",
-  "num_queries": 128,
+  "num_queries": 4096,
   "inject_response_hidden": true,
 
   "data_path": "data/cache/llava_video_178k",
   "eval_manifest": "data/cache/llava_video_178k/eval.jsonl",
+  "benchmark_manifest": "data/cache/videodetailcaption/test.jsonl",
   "num_samples": 20000,
   "frames": 32,
   "max_length": 8192,
@@ -37,6 +38,7 @@
   "tree_budget": 60,
 
   "attn_backend": "flex",
+  "attn_impl": "sdpa",
   "output_dir": "outputs/qformer",
   "log_interval": 10,
   "eval_interval": 500,

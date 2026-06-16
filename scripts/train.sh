@@ -12,4 +12,18 @@ export HF_HOME="${HF_HOME:-/scratch300/$USER/hf_cache}"
 
 if [ $# -ge 1 ] && [[ "$1" != --* ]]; then CONFIG="$1"; shift; else CONFIG="${CONFIG:-experiments/baseline.json}"; fi
 
-torchrun --standalone --nproc_per_node "${NPROC:-8}" -m vflash.train --config "$CONFIG" "$@"
+# Use NPROC if set, else the GPUs SLURM gave us, else CUDA_VISIBLE_DEVICES, else nvidia-smi, else 1.
+if [ -z "${NPROC:-}" ]; then
+  if [ -n "${SLURM_GPUS_ON_NODE:-}" ]; then
+    NPROC="$SLURM_GPUS_ON_NODE"
+  elif [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    NPROC="$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | grep -c .)"
+  elif command -v nvidia-smi >/dev/null 2>&1; then
+    NPROC="$(nvidia-smi -L | grep -c .)"
+  else
+    NPROC=1
+  fi
+fi
+echo "[train] using NPROC=$NPROC GPUs"
+
+torchrun --standalone --nproc_per_node "$NPROC" -m vflash.train --config "$CONFIG" "$@"

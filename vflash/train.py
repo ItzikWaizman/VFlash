@@ -157,7 +157,7 @@ def main():
     except ImportError:
         from transformers import AutoModelForVision2Seq as AutoVLM
     model = AutoVLM.from_pretrained(cfg["target_model"], torch_dtype=dtype,
-                                    attn_implementation="sdpa").to(device)
+                                    attn_implementation=cfg.get("attn_impl", "sdpa")).to(device)
     processor = AutoProcessor.from_pretrained(cfg["target_model"])
     target = HFTarget(model, processor)
     if cfg["mask_token_id"] is None:

@@ -65,6 +65,18 @@ bash scripts/infer.sh experiments/baseline.json                       # chain SD
 bash scripts/infer.sh experiments/baseline.json --draft-tree 1 --tree-budget 60   # DDtree
 ```
 
+3. VideoDetailCaption benchmark (paper-comparable: reports M + speedup):
+```
+bash scripts/benchmark.sh experiments/baseline.json                   # chain
+bash scripts/benchmark.sh experiments/baseline.json --draft-tree 1    # DDtree
+bash scripts/benchmark.sh experiments/baseline.json --judge openai    # also compute M
+```
+Needs `benchmark_manifest` (one json/line: `{"video","prompt","response"}`, response = the
+reference caption). Greedy SD is lossless vs AR, so M equals the target's score; the script
+verifies this (lossless%) and saves predictions to `outputs/<run>/videodetailcaption.jsonl`.
+For the exact paper metric, score that file with lmms-eval's `videodetailcaption` task, or
+pass `--judge openai` (needs `OPENAI_API_KEY`) for a built-in GPT judge approximation.
+
 ## Key knobs (edit the experiment `.json`; a few are also CLI-overridable)
 `visual_compress {none,qformer}` `num_queries` `draft_tree` `tree_budget`
 `block_size` `num_anchors` `draft_layers` `inject_response_hidden`
@@ -73,20 +85,20 @@ bash scripts/infer.sh experiments/baseline.json --draft-tree 1 --tree-budget 60 
 
 ## SLURM (single-line submit; run from the cloned repo root)
 
-Repo root on the cluster: `/scratch300/itzikwaizman/vflash/dflash-visual`.
-First: `cd /scratch300/itzikwaizman/vflash/dflash-visual && git pull && mkdir -p output_logs`.
+Repo root on the cluster: `/scratch300/itzikwaizman/vflash/VFlash`.
+First: `cd /scratch300/itzikwaizman/vflash/VFlash && git pull && mkdir -p output_logs`.
 
 Setup (downloads):
 ```
-sbatch -A gpu-tad-wolf_v2 -p gpu-tad-pool --qos=owner --gres=gpu:1 --time=04:00:00 --cpus-per-task=2 --mem=16G -o output_logs/vflash_setup.out --job-name=vflash_setup --chdir /scratch300/itzikwaizman/vflash/dflash-visual ./scripts/setup.sh experiments/baseline.json
+sbatch -A gpu-tad-wolf_v2 -p gpu-tad-pool --qos=owner --gres=gpu:1 --time=04:00:00 --cpus-per-task=2 --mem=16G -o output_logs/vflash_setup.out --job-name=vflash_setup --chdir /scratch300/itzikwaizman/vflash/VFlash ./scripts/setup.sh experiments/baseline.json
 ```
 Training (8xA100):
 ```
-sbatch -A gpu-tad-wolf_v2 -p gpu-tad-pool --qos=owner --gres=gpu:8 --time=48:00:00 --cpus-per-task=8 --mem=64G -o output_logs/vflash_train.out --job-name=vflash_train --chdir /scratch300/itzikwaizman/vflash/dflash-visual ./scripts/train.sh experiments/baseline.json
+sbatch -A gpu-tad-wolf_v2 -p gpu-tad-pool --qos=owner --gres=gpu:8 --time=48:00:00 --cpus-per-task=8 --mem=64G -o output_logs/vflash_train.out --job-name=vflash_train --chdir /scratch300/itzikwaizman/vflash/VFlash ./scripts/train.sh experiments/baseline.json
 ```
 Evaluation:
 ```
-sbatch -A gpu-tad-wolf_v2 -p gpu-tad-pool --qos=owner --gres=gpu:1 --time=08:00:00 --cpus-per-task=4 --mem=32G -o output_logs/vflash_infer.out --job-name=vflash_infer --chdir /scratch300/itzikwaizman/vflash/dflash-visual ./scripts/infer.sh experiments/baseline.json
+sbatch -A gpu-tad-wolf_v2 -p gpu-tad-pool --qos=owner --gres=gpu:1 --time=08:00:00 --cpus-per-task=4 --mem=32G -o output_logs/vflash_infer.out --job-name=vflash_infer --chdir /scratch300/itzikwaizman/vflash/VFlash ./scripts/infer.sh experiments/baseline.json
 ```
 
 ## Parallelization
