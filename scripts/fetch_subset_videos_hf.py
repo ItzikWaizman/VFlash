@@ -1,24 +1,33 @@
-"""Download complete video subsets from lmms-lab/LLaVA-Video-178K.
+"""Download the 7B target model + selected video subsets from HF.
 
-Unlike fetch_videos_hf.py (which streams through shards to pick individual files),
-this script downloads whole subsets shard-by-shard: download one *.tar.gz, extract
-all videos, delete the tar, repeat. Peak disk = extracted so far + one shard (~5 GB).
+Run this on the remote cluster BEFORE pregen. No GPU needed.
+After this finishes, symlink VFlash/data -> VFlash_data so relative
+paths in the manifests resolve correctly, then sbatch pregen.
 
-Run this on the remote cluster BEFORE running pregen. No GPU needed.
+Cluster usage (run from ~/VFlash):
 
-Example:
-    HF_HOME=/scratch300/itzikwaizman/VflashData/hf_cache \\
-    python scripts/fetch_subset_videos_hf.py \\
-        --subsets 0_30_s_academic_v0_1,30_60_s_academic_v0_1,1_2_m_academic_v0_1,2_3_m_academic_v0_1 \\
-        --data-path /scratch300/itzikwaizman/VflashData/data/cache/llava_video_178k
+    # one-time symlink so manifest paths resolve
+    ln -sfn /scratch300/itzikwaizman/VFlash_data data
+
+    # download model + 4 academic video subsets
+    python scripts/fetch_subset_videos_hf.py
+
+    # then submit pregen
+    sbatch scripts/pregen_remote.sh remote_pregen/remote_academic.jsonl
+
+Disk budget:
+    7B model  : ~15 GB  (in --hf-cache, kept)
+    4 academic : ~249 GB compressed -> ~300 GB extracted
+    Peak extra : one shard at a time (~5 GB) -> total peak ~320 GB
 """
 import argparse
 import os
 import tarfile
 
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import hf_hub_download, list_repo_files, snapshot_download
 
 DATASET_REPO = "lmms-lab/LLaVA-Video-178K"
+TARGET_MODEL  = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
 
 ACADEMIC_SUBSETS = [
     "0_30_s_academic_v0_1",
@@ -26,6 +35,10 @@ ACADEMIC_SUBSETS = [
     "1_2_m_academic_v0_1",
     "2_3_m_academic_v0_1",
 ]
+
+# Defaults matched to the cluster layout the user described
+DEFAULT_HF_CACHE = "/scratch300/itzikwaizman/cache"
+DEFAULT_DATA_PATH = "data/cache/llava_video_178k"   # relative; resolves via symlink VFlash/data -> VFlash_data
 
 
 def _rm_blob(path):
@@ -36,6 +49,20 @@ def _rm_blob(path):
             pass
 
 
+def download_model(hf_cache):
+    print(f"\n[fetch] === downloading target model {TARGET_MODEL} ===", flush=True)
+    snapshot_download(
+        repo_id=TARGET_MODEL,
+        cache_dir=hf_cache,
+        allow_patterns=["*.json", "*.safetensors", "*.model", "*.txt", "tokenizer*"],
+    )
+    used = sum(
+        os.path.getsize(os.path.join(dp, f))
+        for dp, _, fs in os.walk(hf_cache) for f in fs
+    )
+    print(f"[fetch] model done | hf_cache on-disk: {used/1e9:.1f} GB", flush=True)
+
+
 def download_subset(subset, data_path, hf_cache):
     video_dir = os.path.join(data_path, "videos", subset)
     os.makedirs(video_dir, exist_ok=True)
@@ -44,7 +71,7 @@ def download_subset(subset, data_path, hf_cache):
         f for f in list_repo_files(DATASET_REPO, repo_type="dataset")
         if f.startswith(subset + "/") and f.endswith(".tar.gz")
     )
-    print(f"[fetch] {subset}: {len(shards)} shards -> {video_dir}", flush=True)
+    print(f"\n[fetch] === {subset}: {len(shards)} shards -> {video_dir} ===", flush=True)
 
     for i, sf in enumerate(shards):
         done_marker = os.path.join(video_dir, "." + os.path.basename(sf) + ".done")
@@ -52,7 +79,7 @@ def download_subset(subset, data_path, hf_cache):
             print(f"[fetch]   shard {i+1}/{len(shards)} already done, skipping", flush=True)
             continue
 
-        print(f"[fetch]   shard {i+1}/{len(shards)}: downloading {sf} ...", flush=True)
+        print(f"[fetch]   shard {i+1}/{len(shards)}: downloading {os.path.basename(sf)} ...", flush=True)
         try:
             tar_path = hf_hub_download(
                 DATASET_REPO, sf, repo_type="dataset", cache_dir=hf_cache
@@ -73,45 +100,42 @@ def download_subset(subset, data_path, hf_cache):
         _rm_blob(tar_path)
         open(done_marker, "w").close()
 
-        # Running disk usage
         used = sum(
             os.path.getsize(os.path.join(dp, f))
             for dp, _, fs in os.walk(video_dir) for f in fs
             if not f.startswith(".")
         )
-        print(f"[fetch]   shard {i+1}/{len(shards)} done | subset on-disk: {used/1e9:.1f} GB",
-              flush=True)
+        print(f"[fetch]   shard {i+1}/{len(shards)} done | subset on-disk: {used/1e9:.1f} GB", flush=True)
 
     print(f"[fetch] {subset}: complete", flush=True)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--subsets",
-        default=",".join(ACADEMIC_SUBSETS),
-        help="comma-separated subset names (default: all 4 academic subsets)",
-    )
-    ap.add_argument(
-        "--data-path",
-        default="data/cache/llava_video_178k",
-        help="where to write videos/  (same value as data_path in baseline.json)",
-    )
-    ap.add_argument(
-        "--hf-cache",
-        default=os.environ.get("HF_HOME", "hf_cache"),
-        help="HF hub cache dir (tars downloaded here, deleted after extraction)",
-    )
+    ap.add_argument("--subsets", default=",".join(ACADEMIC_SUBSETS),
+                    help="comma-separated subset names (default: 4 academic subsets)")
+    ap.add_argument("--data-path", default=DEFAULT_DATA_PATH,
+                    help="where to write videos/ (default: data/cache/llava_video_178k, "
+                         "resolves via symlink VFlash/data -> VFlash_data)")
+    ap.add_argument("--hf-cache", default=DEFAULT_HF_CACHE,
+                    help=f"HF hub cache dir for model weights and shard blobs (default: {DEFAULT_HF_CACHE})")
+    ap.add_argument("--skip-model", action="store_true",
+                    help="skip model download (if already present in hf-cache)")
     args = ap.parse_args()
 
     subsets = [s.strip() for s in args.subsets.split(",") if s.strip()]
-    print(f"[fetch] downloading {len(subsets)} subsets: {subsets}", flush=True)
-    print(f"[fetch] data_path={args.data_path}  hf_cache={args.hf_cache}", flush=True)
+    print(f"[fetch] hf_cache : {args.hf_cache}", flush=True)
+    print(f"[fetch] data_path: {args.data_path}", flush=True)
+    print(f"[fetch] subsets  : {subsets}", flush=True)
+
+    if not args.skip_model:
+        download_model(args.hf_cache)
 
     for sub in subsets:
         download_subset(sub, args.data_path, args.hf_cache)
 
-    print("[fetch] ALL DONE", flush=True)
+    print("\n[fetch] ALL DONE", flush=True)
+    print("[fetch] Next step: sbatch scripts/pregen_remote.sh remote_pregen/remote_academic.jsonl", flush=True)
 
 
 if __name__ == "__main__":

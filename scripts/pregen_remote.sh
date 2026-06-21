@@ -14,14 +14,14 @@ set -euo pipefail
 
 MANIFEST="${1:?usage: sbatch scripts/pregen_remote.sh <chunk_manifest.jsonl>}"
 
-# --- cluster env: EDIT THESE for your cluster -----------------------------
-REPO_ROOT="${VFLASH_ROOT:-$HOME/VFlash}"      # repo root on the cluster
-export HF_HOME="${HF_HOME:-$HOME/hf_cache}"   # model weights cache (pulled from HF on first run)
-# Activate your environment (pick whichever applies on the cluster):
-#   module load cuda/12.1
-#   source ~/miniconda3/etc/profile.d/conda.sh && conda activate vflash
-source "${VFLASH_ENV:-$HOME/miniconda3/etc/profile.d/conda.sh}"
-conda activate "${VFLASH_CONDA_ENV:-vflash}"
+# --- cluster env ----------------------------------------------------------
+REPO_ROOT="${VFLASH_ROOT:-/scratch300/itzikwaizman/VFlash}"
+export HF_HOME="${HF_HOME:-/scratch300/itzikwaizman/cache}"
+CONDA_ENV_PATH="${VFLASH_CONDA_ENV:-/scratch300/itzikwaizman/conda_envs/unlearning}"
+# find and source conda init script
+CONDA_BASE=$(conda info --base 2>/dev/null) || CONDA_BASE=$(dirname $(dirname $(which conda)))
+source "$CONDA_BASE/etc/profile.d/conda.sh" 2>/dev/null || true
+conda activate "$CONDA_ENV_PATH"
 # --------------------------------------------------------------------------
 
 cd "$REPO_ROOT"
