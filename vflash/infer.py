@@ -1,9 +1,37 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import torch
 from transformers import DynamicCache
 
 from .utils import sample, cuda_time
+
+
+class _Profiler:
+    """Records CUDA-event pairs around named sections with no in-loop syncs;
+    one synchronize() at summary() turns them into milliseconds. No-op if off."""
+
+    def __init__(self, enabled):
+        self.enabled = enabled
+        self.events = {"drafter": [], "target": []}
+
+    @contextmanager
+    def section(self, name):
+        if not self.enabled:
+            yield
+            return
+        a = torch.cuda.Event(enable_timing=True)
+        b = torch.cuda.Event(enable_timing=True)
+        a.record()
+        yield
+        b.record()
+        self.events[name].append((a, b))
+
+    def summary(self):
+        if not self.enabled:
+            return {"drafter": float("nan"), "target": float("nan")}
+        torch.cuda.synchronize()
+        return {k: sum(a.elapsed_time(b) for a, b in v) for k, v in self.events.items()}
 
 
 def _prefill(drafter, target, input_ids, mm_inputs, temperature):
@@ -20,9 +48,10 @@ def _prefill(drafter, target, input_ids, mm_inputs, temperature):
 
 @torch.inference_mode()
 def spec_generate(drafter, target, input_ids, mm_inputs, max_new_tokens, block_size,
-                  mask_token_id, stop_token_ids, temperature=0.0):
+                  mask_token_id, stop_token_ids, temperature=0.0, profile=False):
     drafter.eval()
     device = input_ids.device
+    prof = _Profiler(profile and device.type == "cuda")
     S = input_ids.shape[1]
     max_len = S + max_new_tokens
     out_ids = torch.full((1, max_len + block_size), mask_token_id, dtype=torch.long, device=device)
@@ -33,6 +62,7 @@ def spec_generate(drafter, target, input_ids, mm_inputs, max_new_tokens, block_s
     first_token, context, ctx_pos, past_target = _prefill(drafter, target, input_ids, mm_inputs, temperature)
     out_ids[:, S] = first_token[0, 0]
     ttft = cuda_time() - ttft0
+    draft_ctx_len = int(context.shape[1])                            # injected drafter KV (visual+prompt)
 
     past_draft = DynamicCache()
     ctx_len = 0
@@ -46,15 +76,17 @@ def spec_generate(drafter, target, input_ids, mm_inputs, max_new_tokens, block_s
         noise_emb = target.embed_tokens(block_ids)
         q_pos = torch.arange(start, start + block_size, device=device)
         k_pos = torch.cat([pending_pos, q_pos])[None]
-        hidden = drafter.run(noise_emb, pending_ctx, q_pos[None], k_pos, attn_mask=None,
-                             past_key_values=past_draft)
+        with prof.section("drafter"):
+            hidden = drafter.run(noise_emb, pending_ctx, q_pos[None], k_pos, attn_mask=None,
+                                 past_key_values=past_draft)
         ctx_len += pending_ctx.shape[1]
         past_draft.crop(ctx_len)                                      # drop noise keys, keep context
         draft_logits = target.lm_head(hidden[:, 1:])                  # [1,bs-1,V]
         block_ids[:, 1:] = sample(draft_logits, temperature)
 
-        tout = target.forward(input_ids=block_ids, position_ids=q_pos[None],
-                              past_key_values=past_target, use_cache=True, want_hidden=True)
+        with prof.section("target"):
+            tout = target.forward(input_ids=block_ids, position_ids=q_pos[None],
+                                  past_key_values=past_target, use_cache=True, want_hidden=True)
         posterior = sample(tout.logits, temperature)                 # [1,bs]
         acc = (block_ids[:, 1:] == posterior[:, :-1]).cumprod(1).sum().item()
 
@@ -75,9 +107,12 @@ def spec_generate(drafter, target, input_ids, mm_inputs, max_new_tokens, block_s
     out_ids = out_ids[:, :min(start + 1, max_len)]
     out_ids = _truncate_stop(out_ids, S, stop)
     n_out = out_ids.shape[1] - S
+    timing = prof.summary()
     return SimpleNamespace(output_ids=out_ids.cpu(), num_output_tokens=n_out, ttft=ttft,
                            time_per_output_token=decode_t / max(n_out, 1),
-                           acceptance_lengths=accept_lengths)
+                           acceptance_lengths=accept_lengths, n_blocks=len(accept_lengths),
+                           draft_ctx_len=draft_ctx_len,
+                           drafter_ms=timing["drafter"], target_ms=timing["target"])
 
 
 @torch.inference_mode()

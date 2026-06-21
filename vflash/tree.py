@@ -12,7 +12,7 @@ import torch
 from transformers import DynamicCache
 
 from .utils import sample, cuda_time
-from .infer import _prefill, spec_generate, _truncate_stop
+from .infer import _prefill, spec_generate, _truncate_stop, _Profiler
 
 
 def build_tree(draft_logits, budget):
@@ -125,12 +125,13 @@ def _compact(tensor, past_len, keep):
 
 @torch.inference_mode()
 def ddtree_generate(drafter, target, input_ids, mm_inputs, max_new_tokens, block_size,
-                    mask_token_id, stop_token_ids, temperature=0.0, tree_budget=None):
+                    mask_token_id, stop_token_ids, temperature=0.0, tree_budget=None, profile=False):
     if block_size <= 1:
         return spec_generate(drafter, target, input_ids, mm_inputs, max_new_tokens,
-                             block_size, mask_token_id, stop_token_ids, temperature)
+                             block_size, mask_token_id, stop_token_ids, temperature, profile)
     drafter.eval()
     device = input_ids.device
+    prof = _Profiler(profile and device.type == "cuda")
     S = input_ids.shape[1]
     max_len = S + max_new_tokens
     draft_horizon = block_size - 1
@@ -143,6 +144,7 @@ def ddtree_generate(drafter, target, input_ids, mm_inputs, max_new_tokens, block
     first_token, context, ctx_pos, past_target = _prefill(drafter, target, input_ids, mm_inputs, temperature)
     out_ids[:, S] = first_token[0, 0]
     ttft = cuda_time() - ttft0
+    draft_ctx_len = int(context.shape[1])
 
     past_draft = DynamicCache()
     ctx_len = 0
@@ -156,8 +158,9 @@ def ddtree_generate(drafter, target, input_ids, mm_inputs, max_new_tokens, block
         noise_emb = target.embed_tokens(block_ids)
         q_pos = torch.arange(start, start + block_size, device=device)
         k_pos = torch.cat([pending_pos, q_pos])[None]
-        hidden = drafter.run(noise_emb, pending_ctx, q_pos[None], k_pos, attn_mask=None,
-                             past_key_values=past_draft)
+        with prof.section("drafter"):
+            hidden = drafter.run(noise_emb, pending_ctx, q_pos[None], k_pos, attn_mask=None,
+                                 past_key_values=past_draft)
         ctx_len += pending_ctx.shape[1]
         past_draft.crop(ctx_len)
         draft_logits = target.lm_head(hidden[:, 1:])                 # [1,horizon,V]
@@ -166,8 +169,9 @@ def ddtree_generate(drafter, target, input_ids, mm_inputs, max_new_tokens, block
         verify_ids, verify_pos, mask = compile_tree(
             block_ids[0, 0], start, node_tokens, node_depths, visibility, start, target.dtype, device)
 
-        tout = target.forward(input_ids=verify_ids, position_ids=verify_pos, attention_mask=mask,
-                              past_key_values=past_target, use_cache=True, want_hidden=True)
+        with prof.section("target"):
+            tout = target.forward(input_ids=verify_ids, position_ids=verify_pos, attention_mask=mask,
+                                  past_key_values=past_target, use_cache=True, want_hidden=True)
         posterior = sample(tout.logits, temperature)
         accepted, next_token = follow_tree(child_maps, posterior)
         acc_t = torch.tensor(accepted, dtype=torch.long, device=device)
@@ -191,6 +195,9 @@ def ddtree_generate(drafter, target, input_ids, mm_inputs, max_new_tokens, block
     out_ids = out_ids[:, out_ids[0] != mask_token_id]
     out_ids = _truncate_stop(out_ids, S, stop)
     n_out = out_ids.shape[1] - S
+    timing = prof.summary()
     return SimpleNamespace(output_ids=out_ids.cpu(), num_output_tokens=n_out, ttft=ttft,
                            time_per_output_token=decode_t / max(n_out, 1),
-                           acceptance_lengths=accept_lengths)
+                           acceptance_lengths=accept_lengths, n_blocks=len(accept_lengths),
+                           draft_ctx_len=draft_ctx_len,
+                           drafter_ms=timing["drafter"], target_ms=timing["target"])

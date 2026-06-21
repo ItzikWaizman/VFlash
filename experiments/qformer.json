@@ -2,6 +2,16 @@
   "target_model": "llava-hf/llava-onevision-qwen2-7b-ov-hf",
   "baseline_draft_model": "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
   "data_subset": "0_30_s_academic_v0_1",
+  "data_subsets": [
+    "0_30_s_academic_v0_1",
+    "30_60_s_academic_v0_1",
+    "1_2_m_academic_v0_1",
+    "2_3_m_academic_v0_1",
+    "0_30_s_activitynetqa",
+    "30_60_s_activitynetqa",
+    "1_2_m_activitynetqa",
+    "2_3_m_activitynetqa"
+  ],
 
   "draft_layers": 4,
   "target_layer_ids": null,
@@ -9,13 +19,14 @@
   "mask_token_id": null,
 
   "visual_compress": "qformer",
-  "num_queries": 4096,
+  "num_queries": 512,
   "inject_response_hidden": true,
 
   "data_path": "data/cache/llava_video_178k",
   "eval_manifest": "data/cache/llava_video_178k/eval.jsonl",
   "benchmark_manifest": "data/cache/videodetailcaption/test.jsonl",
-  "num_samples": 50000,
+  "num_samples": 200000,
+  "eval_holdout": 2000,
   "frames": 32,
   "max_length": 8192,
   "context_source": "target",
@@ -43,7 +54,8 @@
   "attn_impl": "sdpa",
   "output_dir": "outputs/qformer",
   "log_interval": 50,
-  "eval_interval": 500,
+  "eval_interval": 1000,
+  "eval_samples": 4,
   "plot_interval": 100,
   "token_stat_interval": 50,
   "seed": 0

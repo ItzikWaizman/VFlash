@@ -38,10 +38,11 @@ class RotaryEmbedding(nn.Module):
 
 
 def apply_rope(x, cos, sin):
-    # x [B,H,S,hd]; cos/sin [B,S,hd]
+    # x [B,H,S,hd]; cos/sin [B,S,hd]. RoPE math in fp32, result cast back to x's
+    # dtype so q/k match v (flex_attention/SDPA require identical q,k,v dtypes).
     cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
-    return x * cos + rotate_half(x) * sin
+    return (x * cos + rotate_half(x) * sin).to(x.dtype)
 
 
 class MLP(nn.Module):

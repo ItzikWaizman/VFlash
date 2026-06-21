@@ -55,8 +55,14 @@ class VideoInstructDataset(Dataset):
 
     def __getitem__(self, i):
         r = self.records[i]
+        try:
+            frames = load_video_frames(r["video"], self.num_frames)
+        except Exception as e:                                   # corrupt/unreadable video -> skip
+            import sys
+            print(f"[dataset] decode failed {r['video']}: {e}", file=sys.stderr, flush=True)
+            return None
         return {
-            "frames": load_video_frames(r["video"], self.num_frames),
+            "frames": frames,
             "prompt": r["prompt"],
             "response": r["response"],
             "video": r["video"],
@@ -65,4 +71,4 @@ class VideoInstructDataset(Dataset):
 
 
 def collate_passthrough(batch):
-    return batch[0]   # bsz=1 online training; one sample per step
+    return batch[0]   # bsz=1 online training; one sample per step (may be None -> caller skips)

@@ -12,10 +12,15 @@ import argparse
 import os
 
 import torch
+from torch.utils.data import DataLoader, Subset
 
 from .dataset import VideoInstructDataset, record_uid
 from ..train import GenCache, gen_cache_dir
 from ..utils import load_config
+
+
+def collate_list(batch):
+    return [s for s in batch if s is not None]                     # drop failed-decode samples
 
 
 def _to_device(v, device, dtype):
@@ -56,6 +61,8 @@ def main():
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--num-workers", type=int, default=8,
+                    help="background video-decode workers (overlaps decode with GPU generation)")
     ap.add_argument("--max-new-tokens", type=int, default=None)
     args = ap.parse_args()
 
@@ -82,17 +89,26 @@ def main():
     mine = list(range(args.shard, len(ds), args.num_shards))            # strided -> balanced shards
     todo = [i for i in mine if cache.get(record_uid(ds.records[i])) is None]
     print(f"[pregen] shard {args.shard}/{args.num_shards}: {len(todo)}/{len(mine)} to generate "
-          f"(rest cached), batch={args.batch_size}, max_new={max_new}", flush=True)
+          f"(rest cached), batch={args.batch_size}, workers={args.num_workers}, "
+          f"max_new={max_new}", flush=True)
+
+    # Decode videos in background workers so CPU decode overlaps GPU generation
+    # (serial main-thread decode otherwise idles the GPU ~50% on long videos).
+    loader = DataLoader(Subset(ds, todo), batch_size=args.batch_size, shuffle=False,
+                        num_workers=args.num_workers, collate_fn=collate_list,
+                        prefetch_factor=2 if args.num_workers > 0 else None,
+                        persistent_workers=False)
 
     done = 0
-    for b in range(0, len(todo), args.batch_size):
-        idxs = todo[b: b + args.batch_size]
-        samples = [ds[i] for i in idxs]
+    for samples in loader:
+        if not samples:                                            # whole batch failed to decode
+            continue
         try:
             enc = build_batch_inputs(processor, samples, device, dtype)
             outs = greedy_generate(model, enc, max_new, eos)
         except Exception as e:
-            print(f"[pregen] batch at {b} failed ({e}); falling back to per-sample", flush=True)
+            torch.cuda.empty_cache()                              # recover OOM before per-sample retry
+            print(f"[pregen] batch at {done} failed ({e}); falling back to per-sample", flush=True)
             outs = []
             for s in samples:
                 try:
@@ -104,7 +120,7 @@ def main():
         for s, ids in zip(samples, outs):
             if ids is not None:
                 cache.put(s["uid"], ids)
-        done += len(idxs)
+        done += len(samples)
         print(f"[pregen] {done}/{len(todo)}", flush=True)
     print(f"[pregen] shard {args.shard} done", flush=True)
 

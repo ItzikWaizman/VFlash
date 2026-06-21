@@ -204,12 +204,16 @@ def make_flex_train_mask(anchor_positions, block_keep, context_seq_pos, block_si
     q_len = n * block_size
 
     def mask_mod(b, h, q_idx, kv_idx):
-        q_block = q_idx // block_size
+        # create_block_mask pads Q_LEN/KV_LEN up to a multiple of 128 and evaluates
+        # mask_mod on those padded indices, so clamp all gathers and explicitly mask
+        # the out-of-range (padding) positions to avoid OOB indexing.
+        in_bounds = (q_idx < q_len) & (kv_idx < sc + q_len)
+        q_block = (q_idx // block_size).clamp(max=n - 1)
         anchor = anchor_positions[q_block]
         is_ctx = kv_idx < sc
         ctx_ok = is_ctx & (context_seq_pos[kv_idx.clamp(max=sc - 1)] < anchor)
-        kv_block = (kv_idx - sc) // block_size
+        kv_block = ((kv_idx - sc).clamp(min=0) // block_size).clamp(max=n - 1)
         draft_ok = (~is_ctx) & (q_block == kv_block)
-        return (ctx_ok | draft_ok) & block_keep[q_block]
+        return in_bounds & ((ctx_ok | draft_ok) & block_keep[q_block])
 
     return create_block_mask(mask_mod, B=1, H=None, Q_LEN=q_len, KV_LEN=sc + q_len, device=device)

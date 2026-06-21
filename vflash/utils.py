@@ -1,6 +1,7 @@
 import os
 import random
 import time
+from datetime import timedelta
 import yaml
 import numpy as np
 import torch
@@ -69,7 +70,8 @@ def maybe_init_distributed():
         return -1
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    # long timeout: rank 0 can spend many minutes in eval while others wait at a barrier
+    dist.init_process_group(backend="nccl", timeout=timedelta(hours=3))
     return local_rank
 
 
