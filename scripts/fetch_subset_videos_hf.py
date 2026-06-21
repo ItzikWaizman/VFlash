@@ -15,8 +15,13 @@ Cluster usage (run from ~/VFlash):
     # then submit pregen
     sbatch scripts/pregen_remote.sh remote_pregen/remote_academic.jsonl
 
+Everything lands under /scratch300/itzikwaizman/VFlash_data/:
+    hf_cache/   <- 7B model weights (~15 GB)
+    data/cache/llava_video_178k/videos/  <- extracted videos (~300 GB)
+                   (accessed as VFlash/data/... via symlink)
+
 Disk budget:
-    7B model  : ~15 GB  (in --hf-cache, kept)
+    7B model  : ~15 GB
     4 academic : ~249 GB compressed -> ~300 GB extracted
     Peak extra : one shard at a time (~5 GB) -> total peak ~320 GB
 """
@@ -37,7 +42,8 @@ ACADEMIC_SUBSETS = [
 ]
 
 # Defaults matched to the cluster layout the user described
-DEFAULT_HF_CACHE = "/scratch300/itzikwaizman/cache"
+VFLASH_DATA = "/scratch300/itzikwaizman/VFlash_data"
+DEFAULT_HF_CACHE = f"{VFLASH_DATA}/hf_cache"        # model weights land here
 DEFAULT_DATA_PATH = "data/cache/llava_video_178k"   # relative; resolves via symlink VFlash/data -> VFlash_data
 
 

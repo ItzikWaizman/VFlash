@@ -16,7 +16,7 @@ MANIFEST="${1:?usage: sbatch scripts/pregen_remote.sh <chunk_manifest.jsonl>}"
 
 # --- cluster env ----------------------------------------------------------
 REPO_ROOT="${VFLASH_ROOT:-/scratch300/itzikwaizman/VFlash}"
-export HF_HOME="${HF_HOME:-/scratch300/itzikwaizman/cache}"
+export HF_HOME="${HF_HOME:-/scratch300/itzikwaizman/VFlash_data/hf_cache}"
 CONDA_ENV_PATH="${VFLASH_CONDA_ENV:-/scratch300/itzikwaizman/conda_envs/unlearning}"
 # find and source conda init script
 CONDA_BASE=$(conda info --base 2>/dev/null) || CONDA_BASE=$(dirname $(dirname $(which conda)))
