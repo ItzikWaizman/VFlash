@@ -25,12 +25,16 @@ import argparse
 import os
 import tarfile
 
-# Must be set before huggingface_hub is imported so xet uses a writable path.
-# HF_HUB_DISABLE_XET=1 falls back to the standard HTTPS downloader (more compatible).
-os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-os.environ.setdefault("HF_HOME", "/scratch300/itzikwaizman/VFlash/hf_cache")
-# XET tries to log to $HOME/.cache which may be read-only on some clusters.
-os.environ.setdefault("XET_LOG_DIR", os.environ["HF_HOME"])
+# xet (HF's Rust download binary) resolves its cache from $HOME/.cache/huggingface/xet/
+# On some clusters $HOME is a read-only NFS mount or doesn't exist.  Override HOME to a
+# writable scratch path so xet can create its cache.  Must happen before any HF import.
+_SCRATCH = "/scratch300/itzikwaizman"
+os.environ.setdefault("HOME", _SCRATCH)
+os.environ.setdefault("HF_HOME", f"{_SCRATCH}/VFlash/hf_cache")
+# Belt-and-suspenders: also point xet's own cache/log dirs to the scratch path.
+_XET_CACHE = os.path.join(os.environ["HF_HOME"], "xet")
+os.environ.setdefault("XET_CACHE_PATH", _XET_CACHE)
+os.environ.setdefault("XET_LOG_DIR", _XET_CACHE)
 
 from huggingface_hub import hf_hub_download, list_repo_files, snapshot_download
 
