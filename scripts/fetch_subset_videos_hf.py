@@ -6,19 +6,15 @@ paths in the manifests resolve correctly, then sbatch pregen.
 
 Cluster usage (run from ~/VFlash):
 
-    # one-time symlink so manifest paths resolve
-    ln -sfn /scratch300/itzikwaizman/VFlash_data data
-
-    # download model + 4 academic video subsets
+    # download model + 4 academic video subsets (no symlinks needed)
     python scripts/fetch_subset_videos_hf.py
 
     # then submit pregen
     sbatch scripts/pregen_remote.sh remote_pregen/remote_academic.jsonl
 
-Everything lands under /scratch300/itzikwaizman/VFlash_data/:
-    hf_cache/   <- 7B model weights (~15 GB)
+Everything lands under /scratch300/itzikwaizman/VFlash/:
+    hf_cache/                            <- 7B model weights (~15 GB)
     data/cache/llava_video_178k/videos/  <- extracted videos (~300 GB)
-                   (accessed as VFlash/data/... via symlink)
 
 Disk budget:
     7B model  : ~15 GB
@@ -42,9 +38,9 @@ ACADEMIC_SUBSETS = [
 ]
 
 # Defaults matched to the cluster layout the user described
-VFLASH_DATA = "/scratch300/itzikwaizman/VFlash_data"
-DEFAULT_HF_CACHE = f"{VFLASH_DATA}/hf_cache"        # model weights land here
-DEFAULT_DATA_PATH = "data/cache/llava_video_178k"   # relative; resolves via symlink VFlash/data -> VFlash_data
+VFLASH_ROOT = "/scratch300/itzikwaizman/VFlash"
+DEFAULT_HF_CACHE = f"{VFLASH_ROOT}/hf_cache"        # model weights
+DEFAULT_DATA_PATH = f"{VFLASH_ROOT}/data/cache/llava_video_178k"  # videos
 
 
 def _rm_blob(path):
