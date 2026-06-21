@@ -25,6 +25,13 @@ import argparse
 import os
 import tarfile
 
+# Must be set before huggingface_hub is imported so xet uses a writable path.
+# HF_HUB_DISABLE_XET=1 falls back to the standard HTTPS downloader (more compatible).
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HOME", "/scratch300/itzikwaizman/VFlash/hf_cache")
+# XET tries to log to $HOME/.cache which may be read-only on some clusters.
+os.environ.setdefault("XET_LOG_DIR", os.environ["HF_HOME"])
+
 from huggingface_hub import hf_hub_download, list_repo_files, snapshot_download
 
 DATASET_REPO = "lmms-lab/LLaVA-Video-178K"
